@@ -17,17 +17,21 @@ limitations under the License.
 package e2e
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
+	"mime/multipart"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -51,6 +55,10 @@ const (
 	frontendSelector         = "name=frontend"
 	redisMasterSelector      = "name=redis-master"
 	redisSlaveSelector       = "name=redis-slave"
+	goproxyContainer         = "goproxy"
+	goproxyPodSelector       = "name=goproxy"
+	netexecContainer         = "netexec"
+	netexecPodSelector       = "name=netexec"
 	kubectlProxyPort         = 8011
 	guestbookStartupTimeout  = 10 * time.Minute
 	guestbookResponseTimeout = 3 * time.Minute
@@ -152,7 +160,6 @@ var _ = Describe("Kubectl client", func() {
 			By("creating the pod")
 			runKubectl("create", "-f", podPath, fmt.Sprintf("--namespace=%v", ns))
 			checkPodsRunningReady(c, ns, []string{simplePodName}, podStartTimeout)
-
 		})
 		AfterEach(func() {
 			cleanup(podPath, ns, simplePodSelector)
@@ -174,12 +181,12 @@ var _ = Describe("Kubectl client", func() {
 			}
 
 			// pretend that we're a user in an interactive shell
-			r, c, err := newBlockingReader("echo hi\nexit\n")
+			r, closer, err := newBlockingReader("echo hi\nexit\n")
 			if err != nil {
 				Failf("Error creating blocking reader: %v", err)
 			}
 			// NOTE this is solely for test cleanup!
-			defer c.Close()
+			defer closer.Close()
 
 			By("executing a command in the container with pseudo-interactive stdin")
 			execOutput = newKubectlCommand("exec", fmt.Sprintf("--namespace=%v", ns), "-i", simplePodName, "bash").
@@ -188,6 +195,114 @@ var _ = Describe("Kubectl client", func() {
 			if e, a := "hi", execOutput; e != a {
 				Failf("Unexpected kubectl exec output. Wanted %q, got %q", e, a)
 			}
+
+			By("executing a command in the container through an HTTP proxy")
+			// Start by checking for the environment variable before anything else
+			kubectlBinPath := os.Getenv("KUBECTLBIN")
+			// Fail if the variable isn't set
+			if kubectlBinPath == "" {
+				Failf("KUBECTLBIN environment variable must be set to the full path of the kubectl binary")
+			}
+
+			apiserverAddr := os.Getenv("APISERVERADDR")
+			// Fail if the variable isn't set
+			if apiserverAddr == "" {
+				Failf("APISERVERADDR environment variable must be set to the full address to the api server")
+			}
+
+			// start the proxy container
+			goproxyPodPath := filepath.Join(testContext.RepoRoot, "test/images/goproxy/pod.yaml")
+			runKubectl("create", "-f", goproxyPodPath, fmt.Sprintf("--namespace=%v", ns))
+
+			// start exec-proxy-tester container
+			netexecPodPath := filepath.Join(testContext.RepoRoot, "contrib/for-tests/netexec/pod.yaml")
+			runKubectl("create", "-f", netexecPodPath, fmt.Sprintf("--namespace=%v", ns))
+			checkPodsRunningReady(c, ns, []string{goproxyContainer, netexecContainer}, podStartTimeout)
+
+			// get the proxy address
+			goproxyPod, err := c.Pods(ns).Get(goproxyContainer)
+			if err != nil {
+				Failf("Unable to get the goproxy pod. Error: %s", err)
+			}
+			proxyAddr := fmt.Sprintf("http://%s:8080", goproxyPod.Status.PodIP)
+			// get the exec address
+			netexecPod, err := c.Pods(ns).Get(netexecContainer)
+			netexecAddr := fmt.Sprintf("http://%s:8080", netexecPod.Status.PodIP)
+
+			// upload kubectl to remote exec server
+			postBodyBuffer := &bytes.Buffer{}
+			postBodyWriter := multipart.NewWriter(postBodyBuffer)
+
+			// Set up the form file
+			fileWriter, err := postBodyWriter.CreateFormFile("file", "kubectl")
+			if err != nil {
+				Failf("Unable to to write kubectl at %s to buffer. Error: %s", kubectlBinPath, err)
+			}
+
+			// Open up the kubectl binary for reading
+			fh, err := os.Open(kubectlBinPath)
+			if err != nil {
+				Failf("Unable to to access kubectl at %s. Error: %s", kubectlBinPath, err)
+			}
+
+			// Copy kubectl binary into the file writer
+			_, err = io.Copy(fileWriter, fh)
+			if err != nil {
+				Failf("Unable to to copy kubectl at %s into the file writer. Error: %s", kubectlBinPath, err)
+			}
+			// Nothing more should be written to this instance of the postBodyWriter
+			postBodyWriter.Close()
+
+			resp, err := http.Post(fmt.Sprintf("%s/upload", netexecAddr), postBodyWriter.FormDataContentType(), postBodyBuffer)
+
+			uploadBinaryName, err := ioutil.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				Failf("Unable to read the name of the uploaded binary: %s", err)
+			}
+
+			if resp.StatusCode != http.StatusCreated {
+				Failf("Unable to upload kubectl binary to remote exec server. Expected status: 201, got %d", resp.StatusCode)
+			}
+			if err != nil {
+				Failf("Unable to upload kubectl binary to the remote exec server due to error: %s", err)
+			}
+			for _, proxyVar := range []string{"http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"} {
+				shellCommand := fmt.Sprintf("%s=%s %s --server=%s --namespace=%s exec nginx echo running in container", proxyVar, proxyAddr, uploadBinaryName, apiserverAddr, ns)
+				// Execute kubectl on remote exec server.
+				resp, err = http.PostForm(fmt.Sprintf("%s/shell", netexecAddr), url.Values{"shellCommand": {shellCommand}})
+				if err != nil {
+					Failf("Unable to execute kubectl binary on the remote exec server due to error: %s", err)
+				}
+				if resp.StatusCode != http.StatusOK {
+					errOut, _ := ioutil.ReadAll(resp.Body)
+					Failf("Unable to execute kubectl binary on remote exec server. Expected status: %d, got %d. Info: %s", http.StatusCreated, resp.StatusCode, errOut)
+				}
+
+				proxyExecOutput, err := ioutil.ReadAll(resp.Body)
+				if err != nil {
+					Failf("Unable to read the result of the kubectl execution on the remote exec server due to error: %s", err)
+				}
+				resp.Body.Close()
+				expectedExecOutput := "running in container\n"
+				// Verify we got the normal output captured by the exec server
+				if string(proxyExecOutput) != expectedExecOutput {
+					Failf("Unexpected kubectl exec output. Wanted '%s', got '%s'", expectedExecOutput, proxyExecOutput)
+				}
+
+				// Verify the proxy server logs saw the connection
+				expectedProxyLog := fmt.Sprintf("Sending request GET %s/api", apiserverAddr)
+				rawProxyLog := strings.Split(runKubectl("log", "goproxy", fmt.Sprintf("--namespace=%v", ns)), "\n")
+				sort.Sort(sort.Reverse(sort.StringSlice(rawProxyLog)))
+				proxyLog := rawProxyLog[2]
+
+				if !strings.Contains(proxyLog, expectedProxyLog) {
+					Failf("Missing expected log result on proxy server. Expected: %s, got %s", expectedProxyLog, proxyLog)
+				}
+			}
+			// Clean up
+			cleanup(goproxyPodPath, ns, goproxyPodSelector)
+			cleanup(netexecPodPath, ns, netexecPodSelector)
 		})
 
 		It("should support inline execution and attach", func() {
