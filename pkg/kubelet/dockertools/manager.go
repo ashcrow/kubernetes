@@ -47,6 +47,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/prober"
 	"k8s.io/kubernetes/pkg/kubelet/qos"
 	kubeletTypes "k8s.io/kubernetes/pkg/kubelet/types"
+	kubeletUtil "k8s.io/kubernetes/pkg/kubelet/util"
 	"k8s.io/kubernetes/pkg/probe"
 	"k8s.io/kubernetes/pkg/securitycontext"
 	"k8s.io/kubernetes/pkg/types"
@@ -692,6 +693,8 @@ func (dm *DockerManager) runContainer(
 	}
 
 	_, containerName := BuildDockerName(dockerName, container)
+	// HACK if annotation then time
+	creatContainerOptionsTiming := kubeletUtil.HackStartTimeByAnnotation(pod)
 	dockerOpts := docker.CreateContainerOptions{
 		Name: containerName,
 		Config: &docker.Config{
@@ -718,6 +721,7 @@ func (dm *DockerManager) runContainer(
 	securityContextProvider := securitycontext.NewSimpleSecurityContextProvider()
 	securityContextProvider.ModifyContainerConfig(pod, container, dockerOpts.Config)
 	dockerContainer, err := dm.client.CreateContainer(dockerOpts)
+	kubeletUtil.HackEndTimeByAnnotation(creatContainerOptionsTiming, pod, "CreateContainer")
 	if err != nil {
 		if ref != nil {
 			dm.recorder.Eventf(ref, "Failed", "Failed to create docker container with error: %v", err)
@@ -781,6 +785,8 @@ func (dm *DockerManager) runContainer(
 	}
 	securityContextProvider.ModifyHostConfig(pod, container, hc)
 
+	// HACK: if annotation then time
+	startcontainerTiming := kubeletUtil.HackStartTimeByAnnotation(pod)
 	if err = dm.client.StartContainer(dockerContainer.ID, hc); err != nil {
 		if ref != nil {
 			dm.recorder.Eventf(ref, "Failed",
@@ -788,6 +794,7 @@ func (dm *DockerManager) runContainer(
 		}
 		return "", err
 	}
+	kubeletUtil.HackEndTimeByAnnotation(startcontainerTiming, pod, "StartContainer")
 	if ref != nil {
 		dm.recorder.Eventf(ref, "Started", "Started with docker id %v", util.ShortenString(dockerContainer.ID, 12))
 	}

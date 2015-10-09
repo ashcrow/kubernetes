@@ -979,7 +979,11 @@ func (kl *Kubelet) GenerateRunContainerOptions(pod *api.Pod, container *api.Cont
 
 	opts.PortMappings = makePortMappings(container)
 	opts.Mounts = makeMounts(container, vol)
+	// HACK: if annotation then time
+	envVarTime := kubeletUtil.HackStartTimeByAnnotation(pod)
 	opts.Envs, err = kl.makeEnvironmentVariables(pod, container)
+	kubeletUtil.HackEndTimeByAnnotation(envVarTime, pod, "makeEnvironmentVariables")
+	// END HACK ----
 	if err != nil {
 		return nil, err
 	}
