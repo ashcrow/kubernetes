@@ -197,6 +197,7 @@ var _ = Describe("Density", func() {
 				PodStatusFile:        fileHndl,
 				Replicas:             totalPods,
 				MaxContainerFailures: &MaxContainerFailures,
+				Annotations:          map[string]string{"kuberenetes.io/hack.13052": "test"},
 			}
 
 			// Create a listener for events.
