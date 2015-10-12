@@ -178,6 +178,7 @@ type RCConfig struct {
 	CpuLimit      int64 // millicores
 	MemRequest    int64 // bytes
 	MemLimit      int64 // bytes
+	Annotations   map[string]string
 
 	// Env vars, set the same for every pod.
 	Env map[string]string
@@ -1254,7 +1255,8 @@ func RunRC(config RCConfig) error {
 			},
 			Template: &api.PodTemplateSpec{
 				ObjectMeta: api.ObjectMeta{
-					Labels: map[string]string{"name": config.Name},
+					Labels:      map[string]string{"name": config.Name},
+					Annotations: config.Annotations,
 				},
 				Spec: api.PodSpec{
 					Containers: []api.Container{
