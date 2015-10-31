@@ -243,7 +243,7 @@ func (s *APIServer) AddFlags(fs *pflag.FlagSet) {
 	fs.Var(&s.ServiceNodePortRange, "service-node-ports", "Deprecated: see --service-node-port-range instead.")
 	fs.MarkDeprecated("service-node-ports", "see --service-node-port-range instead.")
 	fs.StringVar(&s.MasterServiceNamespace, "master-service-namespace", s.MasterServiceNamespace, "The namespace from which the kubernetes master services should be injected into pods")
-	fs.Var(&s.RuntimeConfig, "runtime-config", "A set of key=value pairs that describe runtime configuration that may be passed to apiserver. apis/<groupVersion> key can be used to turn on/off specific api versions. apis/<groupVersion>/<resource> can be used to turn on/off specific resources. api/all and api/legacy are special keys to control all and legacy api versions respectively.")
+	fs.Var(&s.RuntimeConfig, "runtime-config", "A set of key=value pairs that allows for enabling/disabling specific api resources. api/all=false disables all apis. api/legacy=false disables the legacy apis. api/v1=false allows users to disable the v1 API (this takes preference over api/all and api/legacy). extensions/v1beta1=false and extensions/v1beta1/{jobs,deployments}=false allows users to enable/disable the v1beta extensions API (this takes preference over api/all).")
 	fs.StringVar(&s.ClusterName, "cluster-name", s.ClusterName, "The instance prefix for the cluster")
 	fs.BoolVar(&s.EnableProfiling, "profiling", true, "Enable profiling via web interface host:port/debug/pprof/")
 	// TODO: enable cache in integration tests.
@@ -679,8 +679,27 @@ func (s *APIServer) getRuntimeConfigValue(apiKey string, defaultValue bool) bool
 	return defaultValue
 }
 
+// validateRuntimeConfig verifies that all of the keys given in s.RuntimeConfig are valid
+func (s *APIServer) validateRuntimeConfig() error {
+	validRuntimeConfigKeys := []string{"api/all", "api/legacy", "api/v1", "extensions/v1beta1", "extensions/v1beta1/deployments", "extensions/v1beta1/jobs"}
+NEXTKEY:
+	for key := range s.RuntimeConfig {
+		for index := range validRuntimeConfigKeys {
+			if key == validRuntimeConfigKeys[index] {
+				continue NEXTKEY
+			}
+		}
+		return fmt.Errorf("%s is not a valid runtime-config. valid inputs: %s", key, strings.Join(validRuntimeConfigKeys, ", "))
+	}
+	return nil
+}
+
 // Parses the given runtime-config and formats it into map[string]ApiGroupVersionOverride
 func (s *APIServer) parseRuntimeConfig() (map[string]master.APIGroupVersionOverride, error) {
+	// Validate the config before continuing
+	if err := s.validateRuntimeConfig(); err != nil {
+		return nil, err
+	}
 	// "api/all=false" allows users to selectively enable specific api versions.
 	disableAllAPIs := false
 	allAPIFlagValue, ok := s.RuntimeConfig["api/all"]

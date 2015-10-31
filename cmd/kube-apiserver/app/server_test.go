@@ -167,6 +167,14 @@ func TestParseRuntimeConfig(t *testing.T) {
 			err: false,
 		},
 		{
+			// Invalid input
+			runtimeConfig: map[string]string{
+				"invalid": "false",
+			},
+			apiGroupVersionOverrides: map[string]master.APIGroupVersionOverride{},
+			err: true,
+		},
+		{
 			// Cannot override v1 resources.
 			runtimeConfig: map[string]string{
 				"api/v1/pods": "false",
@@ -243,6 +251,41 @@ func TestParseRuntimeConfig(t *testing.T) {
 
 		if err == nil && !reflect.DeepEqual(apiGroupVersionOverrides, test.apiGroupVersionOverrides) {
 			t.Fatalf("unexpected apiGroupVersionOverrides. Actual: %q, expected: %q", apiGroupVersionOverrides, test.apiGroupVersionOverrides)
+		}
+	}
+
+}
+
+func TestValidateRuntimeConfig(t *testing.T) {
+	testCases := []struct {
+		runtimeConfig map[string]string
+		err           bool
+	}{
+		{
+			// Invalid input
+			runtimeConfig: map[string]string{
+				"invalid": "false",
+			},
+			err: true,
+		},
+		{
+			// Valid input
+			runtimeConfig: map[string]string{
+				"api/all": "true",
+			},
+			err: false,
+		},
+	}
+
+	for _, test := range testCases {
+		s := &APIServer{
+			RuntimeConfig: test.runtimeConfig,
+		}
+		err := s.validateRuntimeConfig()
+		if err == nil && test.err {
+			t.Fatalf("expected error for test: %q", test)
+		} else if err != nil && !test.err {
+			t.Fatalf("unexpected error: %s, for test: %q", err, test)
 		}
 	}
 
